@@ -1,0 +1,115 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: nginx-plus
+  namespace: http-echo
+spec:
+  progressDeadlineSeconds: 600
+  replicas: 1
+  revisionHistoryLimit: 10
+  selector:
+    matchLabels:
+      app: nginx-plus
+  strategy:
+    rollingUpdate:
+      maxSurge: 25%
+      maxUnavailable: 25%
+    type: RollingUpdate
+  template:
+    metadata:
+      creationTimestamp: null
+      labels:
+        app: nginx-plus
+      name: nginx-plus
+      namespace: app1
+    spec:
+      containers:
+      - env:
+        - name: POD_NAMESPACE
+          valueFrom:
+            fieldRef:
+              apiVersion: v1
+              fieldPath: metadata.namespace
+        - name: POD_NAME
+          valueFrom:
+            fieldRef:
+              apiVersion: v1
+              fieldPath: metadata.name
+        image: <your_nginx_image>
+        imagePullPolicy: Always
+        name: nginx-plus
+        ports:
+        - containerPort: 80
+          name: http
+          protocol: TCP
+        - containerPort: 443
+          name: https
+          protocol: TCP
+        - containerPort: 8010
+          name: http-2
+          protocol: TCP
+        resources: {}
+        securityContext:
+          allowPrivilegeEscalation: true
+        runAsUser:
+          type: RunAsAny
+        terminationMessagePath: /dev/termination-log
+        terminationMessagePolicy: File
+        volumeMounts:
+        - mountPath: /etc/nginx/nginx.conf
+          name: nginx-conf
+          subPath: nginx.conf
+        - mountPath: /etc/nginx/conf.d/frontend.conf
+          name: frontend-conf
+          subPath: frontend.conf
+        - mountPath: /etc/nginx/conf.d/openid_connect.js
+          name: openid-connect-js
+          subPath: openid_connect.js
+        - mountPath: /etc/nginx/conf.d/openid_connect.server_conf
+          name: openid-connect-server-conf
+          subPath: openid_connect.server_conf
+        - mountPath: /etc/nginx/conf.d/openid_connect_configuration.conf
+          name: openid-connect-configuration-conf
+          subPath: openid_connect_configuration.conf
+      dnsPolicy: ClusterFirst
+      restartPolicy: Always
+      schedulerName: default-scheduler
+      securityContext: {}
+      serviceAccount: nginx-plus
+      serviceAccountName: nginx-plus
+      volumes:
+      - configMap:
+          defaultMode: 420
+          items:
+          - key: nginx.conf
+            path: nginx.conf
+          name: nginx-conf
+        name: nginx-conf
+      - configMap:
+          defaultMode: 420
+          items:
+          - key: frontend.conf
+            path: frontend.conf
+          name: frontend-conf
+        name: frontend-conf
+      - configMap:
+          defaultMode: 420
+          items:
+          - key: openid_connect.js
+            path: openid_connect.js
+          name: oidc-conf
+        name: openid-connect-js
+      - configMap:
+          defaultMode: 420
+          items:
+          - key: openid_connect.server_conf
+            path: openid_connect.server_conf
+          name: oidc-conf
+        name: openid-connect-server-conf
+      - configMap:
+          defaultMode: 420
+          items:
+          - key: openid_connect_configuration.conf
+            path: openid_connect_configuration.conf
+          name: oidc-conf
+        name: openid-connect-configuration-conf

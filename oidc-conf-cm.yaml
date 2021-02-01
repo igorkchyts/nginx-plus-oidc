@@ -1,0 +1,284 @@
+apiVersion: v1
+data:
+  openid_connect.js: "/*\n * JavaScript functions for providing OpenID Connect with
+    NGINX Plus\n * \n * Copyright (C) 2020 Nginx, Inc.\n */\nvar newSession = false;
+    // Used by oidcAuth() and validateIdToken()\n\nexport default {auth, codeExchange,
+    validateIdToken, logout};\n\nfunction auth(r) {\n    if (!r.variables.refresh_token
+    || r.variables.refresh_token == \"-\") {\n        newSession = true;\n\n        //
+    Check we have all necessary configuration variables (referenced only by njs)\n
+    \       var oidcConfigurables = [\"authz_endpoint\", \"scopes\", \"hmac_key\",
+    \"cookie_flags\"];\n        var missingConfig = [];\n        for (var i in oidcConfigurables)
+    {\n            if (!r.variables[\"oidc_\" + oidcConfigurables[i]] || r.variables[\"oidc_\"
+    + oidcConfigurables[i]] == \"\") {\n                missingConfig.push(oidcConfigurables[i]);\n
+    \           }\n        }\n        if (missingConfig.length) {\n            r.error(\"OIDC
+    missing configuration variables: $oidc_\" + missingConfig.join(\" $oidc_\"));\n
+    \           r.return(500, r.variables.internal_error_message);\n            return;\n
+    \       }\n        // Redirect the client to the IdP login page with the cookies
+    we need for state\n        r.return(302, r.variables.oidc_authz_endpoint + getAuthZArgs(r));\n
+    \       return;\n    }\n    \n    // Pass the refresh token to the /_refresh location
+    so that it can be\n    // proxied to the IdP in exchange for a new id_token\n
+    \   r.subrequest(\"/_refresh\", \"token=\" + r.variables.refresh_token,\n        function(reply)
+    {\n            if (reply.status != 200) {\n                // Refresh request
+    failed, log the reason\n                var error_log = \"OIDC refresh failure\";\n
+    \               if (reply.status == 504) {\n                    error_log += \",
+    timeout waiting for IdP\";\n                } else if (reply.status == 400) {\n
+    \                   try {\n                        var errorset = JSON.parse(reply.responseBody);\n
+    \                       error_log += \": \" + errorset.error + \" \" + errorset.error_description;\n
+    \                   } catch (e) {\n                        error_log += \": \"
+    + reply.responseBody;\n                    }\n                } else {\n                    error_log
+    += \" \"  + reply.status;\n                }\n                r.error(error_log);\n\n
+    \               // Clear the refresh token, try again\n                r.variables.refresh_token
+    = \"-\";\n                r.return(302, r.variables.request_uri);\n                return;\n
+    \           }\n\n            // Refresh request returned 200, check response\n
+    \           try {\n                var tokenset = JSON.parse(reply.responseBody);\n
+    \               if (!tokenset.id_token) {\n                    r.error(\"OIDC
+    refresh response did not include id_token\");\n                    if (tokenset.error)
+    {\n                        r.error(\"OIDC \" + tokenset.error + \" \" + tokenset.error_description);\n
+    \                   }\n                    r.variables.refresh_token = \"-\";\n
+    \                   r.return(302, r.variables.request_uri);\n                    return;\n
+    \               }\n\n                // Send the new ID Token to auth_jwt location
+    for validation\n                r.subrequest(\"/_id_token_validation\", \"token=\"
+    + tokenset.id_token,\n                    function(reply) {\n                        if
+    (reply.status != 204) {\n                            r.variables.refresh_token
+    = \"-\";\n                            r.return(302, r.variables.request_uri);\n
+    \                           return;\n                        }\n\n                        //
+    ID Token is valid, update keyval\n                        r.log(\"OIDC refresh
+    success, updating id_token for \" + r.variables.cookie_auth_token);\n                        r.variables.session_jwt
+    = tokenset.id_token; // Update key-value store\n\n                        // Update
+    refresh token (if we got a new one)\n                        if (r.variables.refresh_token
+    != tokenset.refresh_token) {\n                            r.log(\"OIDC replacing
+    previous refresh token (\" + r.variables.refresh_token + \") with new value: \"
+    + tokenset.refresh_token);\n                            r.variables.refresh_token
+    = tokenset.refresh_token; // Update key-value store\n                        }\n\n
+    \                       delete r.headersOut[\"WWW-Authenticate\"]; // Remove evidence
+    of original failed auth_jwt\n                        r.internalRedirect(r.variables.request_uri);
+    // Continue processing original request\n                    }\n                );\n
+    \           } catch (e) {\n                r.variables.refresh_token = \"-\";\n
+    \               r.return(302, r.variables.request_uri);\n                return;\n
+    \           }\n        }\n    );\n}\n\nfunction codeExchange(r) {\n    // First
+    check that we received an authorization code from the IdP\n    if (r.variables.arg_code.length
+    == 0) {\n        if (r.variables.arg_error) {\n            r.error(\"OIDC error
+    receiving authorization code from IdP: \" + r.variables.arg_error_description);\n
+    \       } else {\n            r.error(\"OIDC expected authorization code from
+    IdP but received: \" + r.uri);\n        }\n        r.return(502);\n        return;\n
+    \   }\n\n    // Pass the authorization code to the /_token location so that it
+    can be\n    // proxied to the IdP in exchange for a JWT\n    r.subrequest(\"/_token\",idpClientAuth(r),
+    function(reply) {\n            if (reply.status == 504) {\n                r.error(\"OIDC
+    timeout connecting to IdP when sending authorization code\");\n                r.return(504);\n
+    \               return;\n            }\n\n            if (reply.status != 200)
+    {\n                try {\n                    var errorset = JSON.parse(reply.responseBody);\n
+    \                   if (errorset.error) {\n                        r.error(\"OIDC
+    error from IdP when sending authorization code: \" + errorset.error + \", \" +
+    errorset.error_description);\n                    } else {\n                        r.error(\"OIDC
+    unexpected response from IdP when sending authorization code (HTTP \" + reply.status
+    + \"). \" + reply.responseBody);\n                    }\n                } catch
+    (e) {\n                    r.error(\"OIDC unexpected response from IdP when sending
+    authorization code (HTTP \" + reply.status + \"). \" + reply.responseBody);\n
+    \               }\n                r.return(502);\n                return;\n            }\n\n
+    \           // Code exchange returned 200, check for errors\n            try {\n
+    \               var tokenset = JSON.parse(reply.responseBody);\n                if
+    (tokenset.error) {\n                    r.error(\"OIDC \" + tokenset.error + \"
+    \" + tokenset.error_description);\n                    r.return(500);\n                    return;\n
+    \               }\n\n                // Send the ID Token to auth_jwt location
+    for validation\n                r.subrequest(\"/_id_token_validation\", \"token=\"
+    + tokenset.id_token,\n                    function(reply) {\n                        if
+    (reply.status != 204) {\n                            r.return(500); // validateIdToken()
+    will log errors\n                            return;\n                        }\n\n
+    \                       // If the response includes a refresh token then store
+    it\n                        if (tokenset.refresh_token) {\n                            r.variables.new_refresh
+    = tokenset.refresh_token; // Create key-value store entry\n                            r.log(\"OIDC
+    refresh token stored\");\n                        } else {\n                            r.warn(\"OIDC
+    no refresh token\");\n                        }\n\n                        //
+    Add opaque token to keyval session store\n                        r.log(\"OIDC
+    success, creating session \" + r.variables.request_id);\n                        r.variables.new_session
+    = tokenset.id_token; // Create key-value store entry\n                        r.headersOut[\"Set-Cookie\"]
+    = \"auth_token=\" + r.variables.request_id + \"; \" + r.variables.oidc_cookie_flags;\n
+    \                       r.return(302, r.variables.redirect_base + r.variables.cookie_auth_redir);\n
+    \                  }\n                );\n            } catch (e) {\n                r.error(\"OIDC
+    authorization code sent but token response is not JSON. \" + reply.responseBody);\n
+    \               r.return(502);\n            }\n        }\n    );\n}\n\nfunction
+    validateIdToken(r) {\n    // Check mandatory claims\n    var required_claims =
+    [\"iat\", \"iss\", \"sub\"]; // aud is checked separately\n    var missing_claims
+    = [];\n    for (var i in required_claims) {\n        if (r.variables[\"jwt_claim_\"
+    + required_claims[i]].length == 0 ) {\n            missing_claims.push(required_claims[i]);\n
+    \       }\n    }\n    if (r.variables.jwt_audience.length == 0) missing_claims.push(\"aud\");\n
+    \   if (missing_claims.length) {\n        r.error(\"OIDC ID Token validation error:
+    missing claim(s) \" + missing_claims.join(\" \"));\n        r.return(403);\n        return;\n
+    \   }\n    var validToken = true;\n\n    // Check iat is a positive integer\n
+    \   var iat = Math.floor(Number(r.variables.jwt_claim_iat));\n    if (String(iat)
+    != r.variables.jwt_claim_iat || iat < 1) {\n        r.error(\"OIDC ID Token validation
+    error: iat claim is not a valid number\");\n        validToken = false;\n    }\n\n
+    \   // Audience matching\n    var aud = r.variables.jwt_audience.split(\",\");\n
+    \   if (!aud.includes(r.variables.oidc_client)) {\n        r.error(\"OIDC ID Token
+    validation error: aud claim (\" + r.variables.jwt_audience + \") does not include
+    configured $oidc_client (\" + r.variables.oidc_client + \")\");\n        validToken
+    = false;\n    }\n\n    // If we receive a nonce in the ID Token then we will use
+    the auth_nonce cookies\n    // to check that the JWT can be validated as being
+    directly related to the\n    // original request by this client. This mitigates
+    against token replay attacks.\n    if (newSession) {\n        var client_nonce_hash
+    = \"\";\n        if (r.variables.cookie_auth_nonce) {\n            var c = require('crypto');\n
+    \           var h = c.createHmac('sha256', r.variables.oidc_hmac_key).update(r.variables.cookie_auth_nonce);\n
+    \           client_nonce_hash = h.digest('base64url');\n        }\n        if
+    (r.variables.jwt_claim_nonce != client_nonce_hash) {\n            r.error(\"OIDC
+    ID Token validation error: nonce from token (\" + r.variables.jwt_claim_nonce
+    + \") does not match client (\" + client_nonce_hash + \")\");\n            validToken
+    = false;\n        }\n    }\n\n    if (validToken) {\n        r.return(204);\n
+    \   } else {\n        r.return(403);\n    }\n}\n\nfunction logout(r) {\n    r.log(\"OIDC
+    logout for \" + r.variables.cookie_auth_token);\n    r.variables.session_jwt =
+    \"-\";\n    r.variables.refresh_token = \"-\";\n    r.return(302, r.variables.oidc_logout_redirect);\n}\n\nfunction
+    getAuthZArgs(r) {\n    // Choose a nonce for this flow for the client, and hash
+    it for the IdP\n    var noncePlain = r.variables.request_id;\n    var c = require('crypto');\n
+    \   var h = c.createHmac('sha256', r.variables.oidc_hmac_key).update(noncePlain);\n
+    \   var nonceHash = h.digest('base64url');\n    var authZArgs = \"?response_type=code&scope=\"
+    + r.variables.oidc_scopes + \"&client_id=\" + r.variables.oidc_client + \"&redirect_uri=\"+
+    r.variables.redirect_base + r.variables.redir_location + \"&nonce=\" + nonceHash;\n\n
+    \   r.headersOut['Set-Cookie'] = [\n        \"auth_redir=\" + r.variables.request_uri
+    + \"; \" + r.variables.oidc_cookie_flags,\n        \"auth_nonce=\" + noncePlain
+    + \"; \" + r.variables.oidc_cookie_flags\n    ];\n\n    if ( r.variables.oidc_pkce_enable
+    == 1 ) {\n        var pkce_code_verifier = c.createHmac('sha256', r.variables.oidc_hmac_key).update(String(Math.random())).digest('hex');\n
+    \       r.variables.pkce_id = c.createHash('sha256').update(String(Math.random())).digest('base64url');\n
+    \       var pkce_code_challenge = c.createHash('sha256').update(pkce_code_verifier).digest('base64url');\n
+    \       r.variables.pkce_code_verifier = pkce_code_verifier;\n\n        authZArgs
+    += \"&code_challenge_method=S256&code_challenge=\" + pkce_code_challenge + \"&state=\"
+    + r.variables.pkce_id;\n    } else {\n        authZArgs += \"&state=0\";\n    }\n
+    \   return authZArgs;\n}\n\nfunction idpClientAuth(r) {\n    // If PKCE is enabled
+    we have to use the code_verifier\n    if ( r.variables.oidc_pkce_enable == 1 )
+    {\n        r.variables.pkce_id = r.variables.arg_state;\n        return \"code=\"
+    + r.variables.arg_code + \"&code_verifier=\" + r.variables.pkce_code_verifier;\n
+    \   } else {\n        return \"code=\" + r.variables.arg_code + \"&client_secret=\"
+    + r.variables.oidc_client_secret;\n    }   \n}"
+  openid_connect.server_conf: "    # Advanced configuration START\n    set $internal_error_message
+    \"NGINX / OpenID Connect login failure\\n\";\n    set $pkce_id \"\";\n    resolver
+    8.8.8.8; # For DNS lookup of IdP endpoints;\n    subrequest_output_buffer_size
+    32k; # To fit a complete tokenset response\n    gunzip on; # Decompress IdP responses
+    if necessary\n    # Advanced configuration END\n\n    location = /_jwks_uri {\n
+    \       internal;\n        proxy_cache jwk;                              # Cache
+    the JWK Set recieved from IdP\n        proxy_cache_valid 200 12h;                    #
+    How long to consider keys \"fresh\"\n        proxy_cache_use_stale error timeout
+    updating; # Use old JWK Set if cannot reach IdP\n        proxy_ssl_server_name
+    on;                     # For SNI to the IdP\n        proxy_method GET;                             #
+    In case client request was non-GET\n        proxy_set_header Content-Length \"\";
+    \          # ''\n        proxy_pass $oidc_jwt_keyfile;                 # Expecting
+    to find a URI here\n        proxy_ignore_headers Cache-Control Expires Set-Cookie;
+    # Does not influence caching\n    }\n\n    location @do_oidc_flow {\n        status_zone
+    \"OIDC start\";\n        js_content oidc.auth;\n        default_type text/plain;
+    # In case we throw an error\n    }\n\n    set $redir_location \"/_codexch\";\n
+    \   location = /_codexch {\n        # This location is called by the IdP after
+    successful authentication\n        status_zone \"OIDC code exchange\";\n        js_content
+    oidc.codeExchange;\n        error_page 500 502 504 @oidc_error; \n    }\n   \n
+    \   location = /_token {\n        # This location is called by oidcCodeExchange().
+    We use the proxy_ directives\n        # to construct the OpenID Connect token
+    request, as per:\n        #  http://openid.net/specs/openid-connect-core-1_0.html#TokenRequest\n
+    \       internal;\n        proxy_ssl_server_name on; # For SNI to the IdP\n        proxy_set_header
+    \     Content-Type \"application/x-www-form-urlencoded\";\n        proxy_set_body
+    \       \"grant_type=authorization_code&client_id=$oidc_client&$args&redirect_uri=$redirect_base$redir_location\";\n
+    \       proxy_method          POST;\n        proxy_pass            $oidc_token_endpoint;\n
+    \  }\n\n    location = /_refresh {\n        # This location is called by oidcAuth()
+    when performing a token refresh. We\n        # use the proxy_ directives to construct
+    the OpenID Connect token request, as per:\n        #  https://openid.net/specs/openid-connect-core-1_0.html#RefreshingAccessToken\n
+    \       internal;\n        proxy_ssl_server_name on; # For SNI to the IdP\n        proxy_set_header
+    \     Content-Type \"application/x-www-form-urlencoded\";\n        proxy_set_body
+    \       \"grant_type=refresh_token&refresh_token=$arg_token&client_id=$oidc_client&client_secret=$oidc_client_secret\";\n
+    \       proxy_method          POST;\n        proxy_pass            $oidc_token_endpoint;\n
+    \   }\n\n    location = /_id_token_validation {\n        # This location is called
+    by oidcCodeExchange() and oidcRefreshRequest(). We use\n        # the auth_jwt_module
+    to validate the OpenID Connect token response, as per:\n        #  https://openid.net/specs/openid-connect-core-1_0.html#IDTokenValidation\n
+    \       internal;\n        auth_jwt \"\" token=$arg_token;\n        js_content
+    oidc.validateIdToken;\n        error_page 500 502 504 @oidc_error;\n    }\n\n
+    \   location = /logout {\n        status_zone \"OIDC logout\";\n        add_header
+    Set-Cookie \"auth_token=; $oidc_cookie_flags\"; # Send empty cookie\n        add_header
+    Set-Cookie \"auth_redir=; $oidc_cookie_flags\"; # Erase original cookie\n        js_content
+    oidc.logout;\n    }\n\n    location = /_logout {\n        # This location is the
+    default value of $oidc_logout_redirect (in case it wasn't configured)\n        default_type
+    text/plain;\n        return 200 \"Logged out\\n\";\n    }\n\n    location @oidc_error
+    {\n        # This location is called when oidcAuth() or oidcCodeExchange() returns
+    an error\n        status_zone \"OIDC error\";\n        default_type text/plain;\n
+    \       return 500 $internal_error_message;\n    }\n\n    location /api/ {\n        api
+    write=on;\n        allow 127.0.0.1; # Only the NGINX host may call the NIGNX Plus
+    API\n        deny all;\n        access_log off;\n    }\n\n# vim: syntax=nginx\n"
+  openid_connect_configuration.conf: |
+    # OpenID Connect configuration
+    #
+    # Each map block allows multiple values so that multiple IdPs can be supported,
+    # the $host variable is used as the default input parameter but can be changed.
+    #
+    map $host $oidc_authz_endpoint {
+        default "http://127.0.0.1:8080/auth/realms/master/protocol/openid-connect/auth";
+        #www.example.com "https://my-idp/oauth2/v1/authorize";
+    }
+
+    map $host $oidc_token_endpoint {
+        default "http://127.0.0.1:8080/auth/realms/master/protocol/openid-connect/token";
+    }
+
+    map $host $oidc_jwt_keyfile {
+        default "http://127.0.0.1:8080/auth/realms/master/protocol/openid-connect/certs";
+    }
+
+    map $host $oidc_client {
+        default "my-client-id";
+    }
+
+    map $host $oidc_pkce_enable {
+        default 0;
+    }
+
+    map $host $oidc_client_secret {
+        default "my-client-secret";
+    }
+
+    map $host $oidc_scopes {
+        default "openid+profile+email+offline_access";
+    }
+
+    map $host $oidc_logout_redirect {
+        # Where to send browser after requesting /logout location. This can be
+        # replaced with a custom logout page, or complete URL.
+        default "/_logout"; # Built-in, simple logout page
+    }
+
+    map $host $oidc_hmac_key {
+        # This should be unique for every NGINX instance/cluster
+        default "ChangeMe";
+    }
+
+    map $proto $oidc_cookie_flags {
+        http  "Path=/; SameSite=lax;"; # For HTTP/plaintext testing
+        https "Path=/; SameSite=lax; HttpOnly; Secure;"; # Production recommendation
+    }
+
+    map $http_x_forwarded_port $redirect_base {
+        ""      $proto://$host:$server_port;
+        default $proto://$host:$http_x_forwarded_port;
+    }
+
+    map $http_x_forwarded_proto $proto {
+        ""      $scheme;
+        default $http_x_forwarded_proto;
+    }
+
+    # ADVANCED CONFIGURATION BELOW THIS LINE
+    # Additional advanced configuration (server context) in openid_connect.server_conf
+
+    # JWK Set will be fetched from $oidc_jwks_uri and cached here - ensure writable by nginx user
+    proxy_cache_path /var/cache/nginx/jwk levels=1 keys_zone=jwk:64k max_size=1m;
+
+    # Change timeout values to at least the validity period of each token type
+    keyval_zone zone=oidc_id_tokens:1M state=conf.d/oidc_id_tokens.json timeout=1h;
+    keyval_zone zone=refresh_tokens:1M state=conf.d/refresh_tokens.json timeout=8h;
+    keyval_zone zone=oidc_pkce:128K timeout=90s; # Temporary storage for PKCE code verifier.
+
+    keyval $cookie_auth_token $session_jwt zone=oidc_id_tokens;   # Exchange cookie for JWT
+    keyval $cookie_auth_token $refresh_token zone=refresh_tokens; # Exchange cookie for refresh token
+    keyval $request_id $new_session zone=oidc_id_tokens; # For initial session creation
+    keyval $request_id $new_refresh zone=refresh_tokens; # ''
+    keyval $pkce_id $pkce_code_verifier zone=oidc_pkce;
+
+    auth_jwt_claim_set $jwt_audience aud; # In case aud is an array
+    js_import oidc from conf.d/openid_connect.js;
+
+    # vim: syntax=nginx
+kind: ConfigMap
+metadata:
+  creationTimestamp: null
+  name: oidc-conf
