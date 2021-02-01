@@ -1,5 +1,5 @@
 # nginx-plus-oidc
-Edit and deploy nginx-plus to proxy application requests with Keycloak Single-SignOn 
+Add nginx-plus proxy with Keycloak Single Sign-on 
 
 # Instructions:
 1. Deploy the following configuration files in your project, modify if required: 
