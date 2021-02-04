@@ -1,0 +1,33 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  creationTimestamp: null
+  labels:
+    app: http-echo
+  name: http-echo
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: http-echo
+  strategy: {}
+  template:
+    metadata:
+      creationTimestamp: null
+      labels:
+        app: http-echo
+    spec:
+      serviceAccount: http-echo
+      serviceAccountName: http-echo
+      containers:
+      - image: docker.io/mendhak/http-https-echo:17
+        name: http-https-echo
+        resources: {}
+      ports:
+        - containerPort: 8080
+          name: http
+          protocol: TCP
+        - containerPort: 8443
+          name: https
+          protocol: TCP
+status: {}
